@@ -2,7 +2,7 @@
 import cv2
 import threading
 import time
-from queue import Queue
+import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 class RTSPCameraHandler:
     def __init__(self, camera_config):
         self.camera_id = camera_config['id']
-        self.rtsp_url = camera_config['rtsp_url']
-        self.location = camera_config['location']
+        self.rtsp_url = str(camera_config['rtsp_url'])
+        self.location = camera_config.get('location', 'Classroom')
         self.cap = None
         self.is_running = False
         self.last_frame = None
@@ -23,17 +23,34 @@ class RTSPCameraHandler:
 
     def connect(self):
         try:
-            if str(self.rtsp_url).isdigit():
-                self.cap = cv2.VideoCapture(int(self.rtsp_url), cv2.CAP_DSHOW)
+            # WebCam index check (0, 1, 2)
+            if self.rtsp_url.isdigit():
+                idx = int(self.rtsp_url)
+                # Try direct backend opening
+                for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
+                    self.cap = cv2.VideoCapture(idx, backend)
+                    if self.cap.isOpened():
+                        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                        
+                        # Test if we get real frame (not black/static)
+                        for _ in range(5):
+                            ret, frame = self.cap.read()
+                            if ret and frame is not None and frame.size > 0 and np.mean(frame) > 1.0:
+                                logger.info(f"✅ Camera '{self.camera_id}' connected successfully!")
+                                return True
+                        self.cap.release()
             else:
+                # RTSP CCTV Stream
                 self.cap = cv2.VideoCapture(self.rtsp_url)
-            
-            if self.cap.isOpened():
-                logger.info(f"✅ Camera {self.camera_id} connected!")
-                return True
+                if self.cap.isOpened():
+                    logger.info(f"✅ RTSP Camera '{self.camera_id}' connected!")
+                    return True
+
+            logger.error(f"❌ Camera '{self.camera_id}' open nahi ho pa raha!")
             return False
         except Exception as e:
-            logger.error(f"❌ Camera error: {e}")
+            logger.error(f"❌ Camera connection error: {e}")
             return False
 
     def start_capture(self):
@@ -47,21 +64,20 @@ class RTSPCameraHandler:
                 time.sleep(1)
                 self.connect()
                 continue
-            
+
             ret, frame = self.cap.read()
-            if not ret or frame is None:
+            if ret and frame is not None and frame.size > 0:
+                self._frame_count += 1
+                elapsed = time.time() - self._start_time
+                if elapsed >= 1.0:
+                    self.fps = self._frame_count / elapsed
+                    self._frame_count = 0
+                    self._start_time = time.time()
+
+                with self._lock:
+                    self.last_frame = frame.copy()
+            else:
                 time.sleep(0.01)
-                continue
-            
-            self._frame_count += 1
-            elapsed = time.time() - self._start_time
-            if elapsed >= 1.0:
-                self.fps = self._frame_count / elapsed
-                self._frame_count = 0
-                self._start_time = time.time()
-            
-            with self._lock:
-                self.last_frame = frame.copy()
 
     def get_frame(self):
         with self._lock:
@@ -71,6 +87,7 @@ class RTSPCameraHandler:
         self.is_running = False
         if self.cap:
             self.cap.release()
+
 
 class MultiCameraManager:
     def __init__(self, camera_configs):

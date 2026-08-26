@@ -1,6 +1,16 @@
+# Python environment
 venv/
 __pycache__/
-*.db
-snapshots/
+
+# AI Models & Data
 ml_models/face_embeddings/*
-.env
+snapshots/
+logs/*.log
+
+# Database
+attendance.db
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db

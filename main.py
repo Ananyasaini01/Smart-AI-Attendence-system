@@ -1,7 +1,7 @@
 # main.py
 import cv2
+import numpy as np
 import time
-import threading
 import logging
 import argparse
 
@@ -35,42 +35,49 @@ class SmartAttendanceApp:
     def run(self):
         self.cameras.start_all()
         self.running = True
-        logger.info("📹 Cameras started! Press 'Q' inside the camera window to Quit.")
-        
+        logger.info("📹 System Live! Press 'Q' on the video window to quit.")
+
         while self.running:
-            for cam_id in config.CAMERAS:
-                cid = cam_id['id']
+            for cam_cfg in config.CAMERAS:
+                cid = cam_cfg['id']
                 frame = self.cameras.get_frame(cid)
+
+                # Frame na mile toh Placeholder Screen dikhao
                 if frame is None:
+                    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(placeholder, f"Connecting Camera [{cid}]...", (100, 240),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    cv2.imshow(f"Smart Attendance - {cid}", placeholder)
+                    if cv2.waitKey(10) & 0xFF == ord('q'):
+                        self.running = False
+                        break
                     continue
 
+                # Face Detection & Recognition
                 detections = self.detector.detect_faces(frame)
 
                 for det in detections:
                     x1, y1, x2, y2 = det['bbox']
                     sid, name, conf = self.recognizer.recognize(det.get('embedding'))
-                    
-                    color = (0, 0, 255) # Red for Unknown
+
+                    color = (0, 0, 255) # Red = Unknown
                     label = f"{name} ({conf:.2f})"
 
                     if sid is not None:
-                        color = (0, 255, 0) # Green for Recognized
-                        # 1. Anti Spoof
+                        color = (0, 255, 0) # Green = Known
                         liveness = self.anti_spoof.check_liveness(frame, det['bbox'])
-                        # 2. Emotion
                         emo = self.emotion.detect_emotion(frame, det['bbox'])
-                        # 3. Engagement
                         eng = self.engagement.track_engagement(frame, det['bbox'], sid)
 
                         if liveness['is_live']:
                             self.db.mark_attendance(sid, cid, conf, liveness['liveness_score'])
                             label += f" | {emo['emotion']} | Eng:{eng['score']}%"
                         else:
-                            color = (0, 165, 255) # Orange for Spoof
-                            label += " | ⚠️ SPOOF"
+                            color = (0, 165, 255) # Orange = Spoof
+                            label += " | SPOOF!"
 
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, label, (x1, max(20, y1 - 10)), 
+                    cv2.putText(frame, label, (x1, max(20, y1 - 10)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
                 cv2.imshow(f"Smart Attendance - {cid}", frame)
@@ -95,8 +102,8 @@ if __name__ == "__main__":
 
         roll = input("Enter Roll Number: ")
         name = input("Enter Student Full Name: ")
-        dept = input("Enter Department (e.g. CSE): ")
-        sem = int(input("Enter Semester (e.g. 4): ") or 1)
+        dept = input("Enter Department: ")
+        sem = int(input("Enter Semester: ") or 1)
 
         registrar.register_from_camera(roll, name, camera_source=0, department=dept, semester=sem)
 
