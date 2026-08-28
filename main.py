@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import sqlite3
 import json
+import threading
 import tkinter as tk
 from tkinter import messagebox
 from insightface.app import FaceAnalysis
@@ -9,7 +10,7 @@ from PIL import Image, ImageTk
 
 DB_PATH = "attendance.db"
 
-# ==================== COLORS (Light Professional Theme) ====================
+# ==================== COLORS & DIMENSIONS ====================
 BG_MAIN     = "#f4f6f9"
 BG_CARD     = "#ffffff"
 BG_HEADER   = "#ffffff"
@@ -27,7 +28,6 @@ DANGER_HOV  = "#dc2626"
 INFO        = "#3b82f6"
 INFO_HOV    = "#2563eb"
 
-# Camera display size (chhota kiya)
 CAM_W, CAM_H = 520, 390
 
 # ==================== DATABASE ====================
@@ -53,7 +53,7 @@ def init_db():
 def load_students():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT roll_number, name, department, face_encodings FROM students")
+    cur.execute("SELECT roll_number, name, department, face_encodings FROM students WHERE is_active = 1")
     rows = cur.fetchall()
     conn.close()
     students = []
@@ -81,7 +81,7 @@ def save_to_db(roll, name, dept, sem, emb_list):
     finally:
         conn.close()
 
-# ==================== FACE MATCH ====================
+# ==================== FAST FACE MATCH ====================
 
 def find_match(emb, students, threshold=0.35):
     if not students:
@@ -122,9 +122,14 @@ class FaceAttendanceApp:
     def __init__(self):
         init_db()
 
-        print("[..] InsightFace model load ho raha hai...")
-        self.face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-        self.face_app.prepare(ctx_id=0, det_size=(640, 640))
+        print("[..] InsightFace Ultra-Fast mode load ho raha hai...")
+        # Sirf detection aur recognition models load karenge (No Gender/Age/3D Landmarks)
+        self.face_app = FaceAnalysis(
+            name="buffalo_l",
+            allowed_modules=['detection', 'recognition'],
+            providers=["CPUExecutionProvider"]
+        )
+        self.face_app.prepare(ctx_id=0, det_size=(320, 320))
         print("[OK] Model ready")
 
         self.students = load_students()
@@ -134,6 +139,11 @@ class FaceAttendanceApp:
         self.mode = None
         self.register_info = {}
         self.after_id = None
+        
+        # Threading & Lag-Free variables
+        self.is_ai_busy = False
+        self.latest_detected_faces = []
+        self.lock = threading.Lock()
 
         # ================== MAIN WINDOW ==================
         self.root = tk.Tk()
@@ -183,16 +193,12 @@ class FaceAttendanceApp:
         cam_card = tk.Frame(cam_shadow, bg=BG_CARD)
         cam_card.pack(padx=(0, 3), pady=(0, 3))
 
-        self.vid_lbl = tk.Label(cam_card, bg="#1a1a1a",
-                                text="📷\n\nCamera Off\nClick a button below",
-                                fg="#666", font=("Segoe UI", 13),
-                                width=CAM_W, height=CAM_H)
-        # Fixed size using pixel dimensions
-        self.vid_lbl.config(width=CAM_W, height=CAM_H)
-        self.vid_lbl.pack(padx=8, pady=8)
-        # Force pixel size (width/height in tk.Label is in chars for text, so use frame)
         cam_card.config(width=CAM_W + 16, height=CAM_H + 16)
         cam_card.pack_propagate(False)
+
+        self.vid_lbl = tk.Label(cam_card, bg="#1a1a1a",
+                                text="📷\n\nCamera Off\nClick a button below",
+                                fg="#666", font=("Segoe UI", 13))
         self.vid_lbl.place(x=8, y=8, width=CAM_W, height=CAM_H)
 
         # --- Button Row ---
@@ -359,10 +365,13 @@ class FaceAttendanceApp:
 
     # ================== CAPTURE & ATTENDANCE ==================
     def begin_capture(self):
-        self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             messagebox.showerror("Error", "Camera start nahi ho paya!")
             return
+        
         self.mode = "register"
         self.status_var.set(f"📸  Registering: {self.register_info['name']} — Look at the camera...")
         self.loop()
@@ -371,27 +380,59 @@ class FaceAttendanceApp:
         self.stop_camera()
         self.students = load_students()
         self.count_lbl.config(text=f"{len(self.students)} Registered")
-        self.cap = cv2.VideoCapture(0)
+        
+        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             messagebox.showerror("Error", "Camera start nahi ho paya!")
             return
+        
         self.mode = "attendance"
+        self.latest_detected_faces = []
         self.status_var.set("▶  Attendance Mode Active — Detecting faces...")
         self.loop()
 
-    # ================== CAMERA LOOP ==================
+    # ================== ASYNC AI WORKER ==================
+    def _run_ai_inference(self, frame_to_process):
+        """Background thread to process face recognition without blocking video."""
+        try:
+            # Downscale 50% for 4x faster CPU calculation
+            small_frame = cv2.resize(frame_to_process, (0, 0), fx=0.5, fy=0.5)
+            faces = self.face_app.get(small_frame)
+
+            detected = []
+            for f in faces:
+                # Scale bounding box back to original size
+                b = (f.bbox * 2).astype(int)
+                match, sim = find_match(f.embedding, self.students)
+                if match:
+                    match_percent = int(sim * 100)
+                    label = f"{match['name']} | {match['dept']} ({match_percent}%)"
+                    color = (16, 185, 129)
+                else:
+                    label = "Unknown"
+                    color = (239, 68, 68)
+                detected.append((b, label, color))
+
+            with self.lock:
+                self.latest_detected_faces = detected
+        finally:
+            self.is_ai_busy = False
+
+    # ================== ULTRA-SMOOTH CAMERA LOOP ==================
     def loop(self):
         if not self.cap or not self.cap.isOpened():
             return
 
         ret, frame = self.cap.read()
         if not ret:
-            self.after_id = self.root.after(30, self.loop)
+            self.after_id = self.root.after(10, self.loop)
             return
 
-        faces = self.face_app.get(frame)
-
         if self.mode == "register":
+            # Quick sync detection for register only
+            faces = self.face_app.get(frame)
             if faces:
                 f = faces[0]
                 b = f.bbox.astype(int)
@@ -419,24 +460,20 @@ class FaceAttendanceApp:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (239, 68, 68), 2)
 
         elif self.mode == "attendance":
-            for f in faces:
-                b = f.bbox.astype(int)
-                match, sim = find_match(f.embedding, self.students)
+            # Trigger Background Thread if AI is free
+            if not self.is_ai_busy:
+                self.is_ai_busy = True
+                threading.Thread(target=self._run_ai_inference, args=(frame.copy(),), daemon=True).start()
 
-                if match:
-                    match_percent = int(sim * 100)
-                    label = f"{match['name']} | {match['dept']} ({match_percent}%)"
-                    color = (16, 185, 129)
-                else:
-                    label = "Unknown"
-                    color = (239, 68, 68)
-
-                cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), color, 2)
-                cv2.putText(frame, label, (b[0], b[1] - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # Draw latest boxes instantly (No lag, 60fps video feed)
+            with self.lock:
+                for b, label, color in self.latest_detected_faces:
+                    cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), color, 2)
+                    cv2.putText(frame, label, (b[0], b[1] - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
 
         self.display(frame)
-        self.after_id = self.root.after(30, self.loop)
+        self.after_id = self.root.after(10, self.loop)
 
     def display(self, frame):
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -454,6 +491,8 @@ class FaceAttendanceApp:
             self.cap.release()
             self.cap = None
         self.mode = None
+        with self.lock:
+            self.latest_detected_faces = []
         self.status_var.set("⏹  Camera Stopped")
         self.vid_lbl.configure(image="",
                                text="📷\n\nCamera Off\nClick a button below",
