@@ -60,6 +60,7 @@ class DatabaseManager:
                     encodings_map[student.id] = {
                         'name': student.name,
                         'roll': student.roll_number,
+                        'department': student.department or 'N/A',
                         'encodings': [
                             np.array(enc) for enc in json.loads(student.face_encodings)
                         ]
