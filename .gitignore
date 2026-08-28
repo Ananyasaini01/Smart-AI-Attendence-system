@@ -1,16 +1,29 @@
-# Python environment
-venv/
-__pycache__/
-
-# AI Models & Data
-ml_models/face_embeddings/*
-snapshots/
-logs/*.log
-
-# Database
-attendance.db
+# Database files & folders
+database/
+enrollment/
+delete/
 *.db
+*.sqlite3
+attendance.db
 
-# OS files
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Python Cache & Bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# InsightFace Models & ONNX
+*.onnx
+.insightface/
+models/
+
+# VS Code & OS temporary files
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
